@@ -1,3 +1,3 @@
 # wlog
-A simple log library that you can use it without any complicated configurations, best for test demonstration.
+一个简单即用的日志库，非常适合用于快速搭建演示程序。
 # usage
