@@ -1,3 +1,26 @@
+//	-logtostderr=false
+//		Logs are written to standard error instead of to files.
+//	-alsologtostderr=false
+//		Logs are written to standard error as well as to files.
+//	-stderrthreshold=ERROR
+//		Log events at or above this severity are logged to standard
+//		error as well as to files.
+//	-log_dir=""
+//		Log files will be written to this directory instead of the
+//		default directory ./log/.
+//
+//	Other flags provide aids to debugging.
+//
+//	-log_backtrace_at=""
+//		When set to a file and line number holding a logging statement,
+//		such as
+//			-log_backtrace_at=gopherflakes.go:234
+//		a stack trace will be written to the Info log whenever execution
+//		hits that statement. (Unlike with -vmodule, the ".go" must be
+//		present.)
+//  -logThreshold=INFO
+//		Log events at or above this severity are logged to file
+
 package wlog
 
 import (
@@ -13,13 +36,10 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"errors"
 )
 
 var logging loggingT
-
-func init() {
-
-}
 
 //日志等级
 type severity int32
@@ -82,7 +102,7 @@ func (s *severity) Set(value string) error {
 		}
 		threshold = severity(v)
 	}
-	logging.stderrThreshold.set(threshold)
+	s.set(threshold)
 	return nil
 }
 
@@ -96,12 +116,74 @@ func severityByName(s string) (severity, bool) {
 	return 0, false
 }
 
-func Info(args ...interface{}) {
-	logging.print(INFO, args...)
+// traceLocation represents the setting of the -log_backtrace_at flag.
+type traceLocation struct {
+	file string
+	line int
 }
 
-func Infoln(args ...interface{}) {
-	//logging.println(INFO, args...)
+// isSet reports whether the trace location has been specified.
+// logging.mu is held.
+func (t *traceLocation) isSet() bool {
+	return t.line > 0
+}
+
+// match reports whether the specified file and line matches the trace location.
+// The argument file name is the full path, not the basename specified in the flag.
+// logging.mu is held.
+func (t *traceLocation) match(file string, line int) bool {
+	if t.line != line {
+		return false
+	}
+	if i := strings.LastIndex(file, "/"); i >= 0 {
+		file = file[i+1:]
+	}
+	return t.file == file
+}
+
+func (t *traceLocation) String() string {
+	// Lock because the type is not atomic. TODO: clean this up.
+	logging.mu.Lock()
+	defer logging.mu.Unlock()
+	return fmt.Sprintf("%s:%d", t.file, t.line)
+}
+
+// Get is part of the (Go 1.2) flag.Getter interface. It always returns nil for this flag type since the
+// struct is not exported
+func (t *traceLocation) Get() interface{} {
+	return nil
+}
+
+var errTraceSyntax = errors.New("syntax error: expect file.go:234")
+
+// Syntax: -log_backtrace_at=gopherflakes.go:234
+// Note that unlike vmodule the file extension is included here.
+func (t *traceLocation) Set(value string) error {
+	if value == "" {
+		// Unset.
+		t.line = 0
+		t.file = ""
+	}
+	fields := strings.Split(value, ":")
+	if len(fields) != 2 {
+		return errTraceSyntax
+	}
+	file, line := fields[0], fields[1]
+	if !strings.Contains(file, ".") {
+		return errTraceSyntax
+	}
+	v, err := strconv.Atoi(line)
+	if err != nil {
+		return errTraceSyntax
+	}
+	if v <= 0 {
+		return errors.New("negative or zero value for level")
+	}
+	logging.mu.Lock()
+	defer logging.mu.Unlock()
+	t.line = v
+	t.file = file
+	return nil
 }
 
 // buffer holds a byte Buffer for reuse. The zero value is ready for use.
@@ -152,49 +234,30 @@ func (buf *buffer) someDigits(i, d int) int {
 	return copy(buf.tmp[i:], buf.tmp[j:])
 }
 
-// traceLocation represents the setting of the -log_backtrace_at flag.
-type traceLocation struct {
-	file string
-	line int
-}
-
-// isSet reports whether the trace location has been specified.
-// logging.mu is held.
-func (t *traceLocation) isSet() bool {
-	return t.line > 0
-}
-
-// match reports whether the specified file and line matches the trace location.
-// The argument file name is the full path, not the basename specified in the flag.
-// logging.mu is held.
-func (t *traceLocation) match(file string, line int) bool {
-	if t.line != line {
-		return false
-	}
-	if i := strings.LastIndex(file, "/"); i >= 0 {
-		file = file[i+1:]
-	}
-	return t.file == file
-}
-
-func (t *traceLocation) String() string {
-	// Lock because the type is not atomic. TODO: clean this up.
-	logging.mu.Lock()
-	defer logging.mu.Unlock()
-	return fmt.Sprintf("%s:%d", t.file, t.line)
-}
-
-// Get is part of the (Go 1.2) flag.Getter interface. It always returns nil for this flag type since the
-// struct is not exported
-func (t *traceLocation) Get() interface{} {
-	return nil
-}
-
 // flushSyncWriter is the interface satisfied by logging destinations.
 type flushSyncWriter interface {
 	Flush() error
 	Sync() error
 	io.Writer
+}
+
+func init() {
+	flag.BoolVar(&logging.toStderr, "logtostderr", false, "log to standard error instead of files")
+	flag.BoolVar(&logging.alsoToStderr, "alsologtostderr", false, "log to standard error as well as files")
+	flag.Var(&logging.stderrThreshold, "stderrthreshold", "logs at or above this threshold go to stderr")
+	flag.Var(&logging.traceLocation, "log_backtrace_at", "when logging hits line file:N, emit a stack trace")
+	flag.Var(&logging.logThreshold, "logThreshold", "logs at or above this threshold go to file")
+
+	// Default stderrThreshold is ERROR.
+	logging.stderrThreshold = ERROR
+	logging.logThreshold = INFO
+
+	go logging.flushDaemon()
+}
+
+// Flush flushes all pending log I/O.
+func Flush() {
+	logging.lockAndFlush()
 }
 
 type loggingT struct {
@@ -222,6 +285,9 @@ type loggingT struct {
 
 	// traceLocation is the state of the -log_backtrace_at flag.
 	traceLocation traceLocation
+
+	// Level flag. Handled atomically.
+	logThreshold severity // The -logThreshold flag.
 }
 
 // output writes the data to the log files and releases the buffer.
@@ -245,21 +311,11 @@ func (l *loggingT) output(s severity, buf *buffer, file string, line int, alsoTo
 				l.exit(err)
 			}
 		}
-		switch s {
-		case fatalLog:
-			l.file[fatalLog].Write(data)
-			fallthrough
-		case errorLog:
-			l.file[errorLog].Write(data)
-			fallthrough
-		case warningLog:
-			l.file[warningLog].Write(data)
-			fallthrough
-		case infoLog:
-			l.file[infoLog].Write(data)
+		if s >= l.logThreshold.get(){
+			l.file.Write(data)
 		}
 	}
-	if s == fatalLog {
+	if s == FATAL {
 		// If we got here via Exit rather than Fatal, print no stacks.
 		if atomic.LoadUint32(&fatalNoStacks) > 0 {
 			l.mu.Unlock()
@@ -275,22 +331,15 @@ func (l *loggingT) output(s severity, buf *buffer, file string, line int, alsoTo
 		}
 		// Write the stack trace for all goroutines to the files.
 		trace := stacks(true)
-		logExitFunc = func(error) {} // If we get a write error, we'll still exit below.
-		for log := fatalLog; log >= infoLog; log-- {
-			if f := l.file[log]; f != nil { // Can be nil if -logtostderr is set.
-				f.Write(trace)
-			}
+		if f := l.file; f != nil {// Can be nil if -logtostderr is set.
+			f.Write(trace)
 		}
 		l.mu.Unlock()
 		timeoutFlush(10 * time.Second)
-		os.Exit(255) // C++ uses -1, which is silly because it's anded with 255 anyway.
+		os.Exit(255) // C++ uses -1, which is silly because it's ended with 255 anyway.
 	}
 	l.putBuffer(buf)
 	l.mu.Unlock()
-	if stats := severityStats[s]; stats != nil {
-		atomic.AddInt64(&stats.lines, 1)
-		atomic.AddInt64(&stats.bytes, int64(len(data)))
-	}
 }
 
 // createFiles creates all the log files for severity from sev down to infoLog.
@@ -310,6 +359,21 @@ func (l *loggingT) createFile() error {
 	return nil
 }
 
+const flushInterval = 30 * time.Second
+
+// flushDaemon periodically flushes the log file buffers.
+func (l *loggingT) flushDaemon() {
+	for _ = range time.NewTicker(flushInterval).C {
+		l.lockAndFlush()
+	}
+}
+
+func (l *loggingT) println(s severity, args ...interface{}) {
+	buf, file, line := l.header(s, 0)
+	fmt.Fprintln(buf, args...)
+	l.output(s, buf, file, line, false)
+}
+
 func (l *loggingT) print(s severity, args ...interface{}) {
 	buf, file, line := l.header(s, 0)
 	fmt.Fprint(buf, args...)
@@ -317,6 +381,27 @@ func (l *loggingT) print(s severity, args ...interface{}) {
 		buf.WriteByte('\n')
 	}
 	l.output(s, buf, file, line, false)
+}
+
+func (l *loggingT) printf(s severity, format string, args ...interface{}) {
+	buf, file, line := l.header(s, 0)
+	fmt.Fprintf(buf, format, args...)
+	if buf.Bytes()[buf.Len()-1] != '\n' {
+		buf.WriteByte('\n')
+	}
+	l.output(s, buf, file, line, false)
+}
+
+// putBuffer returns a buffer to the free list.
+func (l *loggingT) putBuffer(b *buffer) {
+	if b.Len() >= 256 {
+		// Let big buffers die a natural death.
+		return
+	}
+	l.freeListMu.Lock()
+	b.next = l.freeList
+	l.freeList = b
+	l.freeListMu.Unlock()
 }
 
 /*
@@ -371,9 +456,9 @@ func (l *loggingT) formatHeader(s severity, file string, line int) *buffer {
 	buf.WriteString(severityString[s])
 	buf.tmp[0] = ' '
 	buf.twoDigits(1, int(month))
-	buf.tmp[3] = ':'
+	buf.tmp[3] = '/'
 	buf.twoDigits(4, day)
-	buf.tmp[6] = '-'
+	buf.tmp[6] = ' '
 	buf.twoDigits(7, hour)
 	buf.tmp[9] = ':'
 	buf.twoDigits(10, minute)
@@ -410,6 +495,46 @@ func (l *loggingT) getBuffer() *buffer {
 	return b
 }
 
+func (l *loggingT) exit(err error) {
+	fmt.Fprintf(os.Stderr, "log: exiting because of error: %s\n", err)
+	l.flush()
+	os.Exit(2)
+}
+
+// lockAndFlush is like flush but locks l.mu first.
+func (l *loggingT) lockAndFlush() {
+	l.mu.Lock()
+	l.flush()
+	l.mu.Unlock()
+}
+
+// flushes the log and attempts to "sync" their data to disk.
+// l.mu is held.
+func (l *loggingT) flush() {
+	file := l.file
+	if file != nil {
+		file.Flush() // ignore error
+		file.Sync()  // ignore error
+	}
+}
+
+// timeoutFlush calls Flush and returns when it completes or after timeout
+// elapses, whichever happens first.  This is needed because the hooks invoked
+// by Flush may deadlock when glog.Fatal is called from a hook that holds
+// a lock.
+func timeoutFlush(timeout time.Duration) {
+	done := make(chan bool, 1)
+	go func() {
+		Flush()
+		done <- true
+	}()
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		fmt.Fprintln(os.Stderr, "log: Flush took longer than", timeout)
+	}
+}
+
 // stacks is a wrapper for runtime.Stack that attempts to recover the data for all goroutines.
 func stacks(all bool) []byte {
 	// We don't know how big the traces are, so grow a few times if they don't fit. Start large, though.
@@ -440,6 +565,25 @@ type syncBuffer struct {
 	nbytes uint64 // The number of bytes written to this file
 }
 
+func (sb *syncBuffer) Sync() error {
+	return sb.file.Sync()
+}
+
+func (sb *syncBuffer) Write(p []byte) (n int, err error) {
+	if sb.nbytes+uint64(len(p)) >= MaxSize {
+		if err := sb.rotateFile(time.Now()); err != nil {
+			sb.logger.exit(err)
+		}
+	}
+	n, err = sb.Writer.Write(p)
+	sb.nbytes += uint64(n)
+	if err != nil {
+		sb.logger.exit(err)
+	}
+	return
+}
+
+const bufferSize = 256 * 1024
 // rotateFile closes the syncBuffer's file and starts a new one.
 func (sb *syncBuffer) rotateFile(now time.Time) error {
 	if sb.file != nil {
@@ -460,8 +604,108 @@ func (sb *syncBuffer) rotateFile(now time.Time) error {
 	fmt.Fprintf(&buf, "Log file created at: %s\n", now.Format("2006/01/02 15:04:05"))
 	fmt.Fprintf(&buf, "Running on machine: %s\n", host)
 	fmt.Fprintf(&buf, "Binary: Built with %s %s for %s/%s\n", runtime.Compiler, runtime.Version(), runtime.GOOS, runtime.GOARCH)
-	fmt.Fprintf(&buf, "Log line format: [IWEF]mmdd hh:mm:ss.uuuuuu threadid file:line] msg\n")
+	fmt.Fprintf(&buf, "Log line format: [LEVEL]mm:dd-hh:mm:ss.uuuuuu [file:line] msg\n")
 	n, err := sb.file.Write(buf.Bytes())
 	sb.nbytes += uint64(n)
 	return err
+}
+
+// Arguments are handled in the manner of fmt.Print; a newline is appended if missing.
+func Debug(args ...interface{}) {
+	logging.print(DEBUG, args...)
+}
+
+func Debugln(args ...interface{}) {
+	logging.println(DEBUG, args...)
+}
+
+// Arguments are handled in the manner of fmt.Printf; a newline is appended if missing.
+func Debugf(format string, args ...interface{}) {
+	logging.printf(DEBUG, format, args...)
+}
+
+// Arguments are handled in the manner of fmt.Print; a newline is appended if missing.
+func Info(args ...interface{}) {
+	logging.print(INFO, args...)
+}
+
+func Infoln(args ...interface{}) {
+	logging.println(INFO, args...)
+}
+
+// Arguments are handled in the manner of fmt.Printf; a newline is appended if missing.
+func Infof(format string, args ...interface{}) {
+	logging.printf(INFO, format, args...)
+}
+
+// Arguments are handled in the manner of fmt.Print; a newline is appended if missing.
+func Warning(args ...interface{}) {
+	logging.print(WARNING, args...)
+}
+
+// Arguments are handled in the manner of fmt.Println; a newline is appended if missing.
+func Warningln(args ...interface{}) {
+	logging.println(WARNING, args...)
+}
+
+// Arguments are handled in the manner of fmt.Printf; a newline is appended if missing.
+func Warningf(format string, args ...interface{}) {
+	logging.printf(WARNING, format, args...)
+}
+
+// Arguments are handled in the manner of fmt.Print; a newline is appended if missing.
+func Error(args ...interface{}) {
+	logging.print(ERROR, args...)
+}
+
+// Arguments are handled in the manner of fmt.Println; a newline is appended if missing.
+func Errorln(args ...interface{}) {
+	logging.println(ERROR, args...)
+}
+
+// Arguments are handled in the manner of fmt.Printf; a newline is appended if missing.
+func Errorf(format string, args ...interface{}) {
+	logging.printf(ERROR, format, args...)
+}
+
+// including a stack trace of all running goroutines, then calls os.Exit(255).
+// Arguments are handled in the manner of fmt.Print; a newline is appended if missing.
+func Fatal(args ...interface{}) {
+	logging.print(FATAL, args...)
+}
+
+// including a stack trace of all running goroutines, then calls os.Exit(255).
+// Arguments are handled in the manner of fmt.Println; a newline is appended if missing.
+func Fatalln(args ...interface{}) {
+	logging.println(FATAL, args...)
+}
+
+// including a stack trace of all running goroutines, then calls os.Exit(255).
+// Arguments are handled in the manner of fmt.Printf; a newline is appended if missing.
+func Fatalf(format string, args ...interface{}) {
+	logging.printf(FATAL, format, args...)
+}
+
+// fatalNoStacks is non-zero if we are to exit without dumping goroutine stacks.
+// It allows Exit and relatives to use the Fatal logs.
+var fatalNoStacks uint32
+
+// Exit logs to the FATAL, then calls os.Exit(1).
+// Arguments are handled in the manner of fmt.Print; a newline is appended if missing.
+func Exit(args ...interface{}) {
+	atomic.StoreUint32(&fatalNoStacks, 1)
+	logging.print(FATAL, args...)
+}
+
+// Exitln logs to the FATAL, then calls os.Exit(1).
+func Exitln(args ...interface{}) {
+	atomic.StoreUint32(&fatalNoStacks, 1)
+	logging.println(FATAL, args...)
+}
+
+// Exitf logs to the FATAL, then calls os.Exit(1).
+// Arguments are handled in the manner of fmt.Printf; a newline is appended if missing.
+func Exitf(format string, args ...interface{}) {
+	atomic.StoreUint32(&fatalNoStacks, 1)
+	logging.printf(FATAL, format, args...)
 }

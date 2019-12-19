@@ -2,6 +2,7 @@ package wlog
 
 import (
 	"errors"
+	"flag"
 	"fmt"
 	"os"
 	"os/user"
@@ -11,14 +12,17 @@ import (
 )
 
 var (
-	logDir = "./"
+	MaxSize  uint64 = 1024 * 1024 * 1800 // MaxSize is the maximum size of a log file in bytes.
+	logDir   string
 	pid      = os.Getpid()
 	program  = filepath.Base(os.Args[0])
 	host     = "unknownhost"
+
 	userName = "unknownuser"
 )
 
 func init() {
+	logDir = *flag.String("log_dir", "./log/", "If non-empty, write log files in this directory")
 	h, err := os.Hostname()
 	if err == nil {
 		host = shortHostname(h)
@@ -65,18 +69,24 @@ func create(t time.Time) (f *os.File, filename string, err error) {
 	if len(logDir) == 0 {
 		return nil, "", errors.New("log: no log dir")
 	}
+	s, err := os.Stat(logDir)
+	if err != nil{
+		if !os.IsExist(err){//不存在
+			os.Mkdir(logDir, os.ModePerm)
+		}
+	}else{
+		if !s.IsDir(){//是个文件
+			return nil, "", errors.New("logDir is a file")
+		}
+	}
+
 	name := logName(t)
-	var lastErr error
 
 	fname := filepath.Join(logDir, name)
-	f, err := os.Create(fname)
+	f, err = os.Create(fname)
 	if err == nil {
-		symlink := filepath.Join(dir, link)
-		os.Remove(symlink)        // ignore err
-		os.Symlink(name, symlink) // ignore err
 		return f, fname, nil
 	}
-	lastErr = err
 
-	return nil, "", fmt.Errorf("log: cannot create log: %v", lastErr)
+	return nil, "", fmt.Errorf("log: cannot create log: %v", err)
 }
