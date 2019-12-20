@@ -2,7 +2,6 @@ package wlog
 
 import (
 	"errors"
-	"flag"
 	"fmt"
 	"os"
 	"os/user"
@@ -12,22 +11,22 @@ import (
 )
 
 var (
-	MaxSize  uint64 = 1024 * 1024 * 1800 // MaxSize is the maximum size of a log file in bytes.
-	logDir   string
-	pid      = os.Getpid()
-	program  = filepath.Base(os.Args[0])
-	host     = "unknownhost"
-
-	userName = "unknownuser"
+	pid      int
+	program  string
+	host     string
+	userName string
 )
 
 func init() {
-	logDir = *flag.String("log_dir", "./log/", "If non-empty, write log files in this directory")
+	pid = os.Getpid()
+	program = filepath.Base(os.Args[0])
+	host = "unknownhost"
 	h, err := os.Hostname()
 	if err == nil {
 		host = shortHostname(h)
 	}
 
+	userName = "unknownuser"
 	current, err := user.Current()
 	if err == nil {
 		userName = current.Username
@@ -66,27 +65,38 @@ func logName(t time.Time) (name string) {
 // successfully, create also attempts to update the symlink for that tag, ignoring
 // errors.
 func create(t time.Time) (f *os.File, filename string, err error) {
-	if len(logDir) == 0 {
-		return nil, "", errors.New("log: no log dir")
-	}
-	s, err := os.Stat(logDir)
-	if err != nil{
-		if !os.IsExist(err){//不存在
-			os.Mkdir(logDir, os.ModePerm)
-		}
-	}else{
-		if !s.IsDir(){//是个文件
-			return nil, "", errors.New("logDir is a file")
-		}
+	err = createDir(config.LogDir)
+	if err != nil {
+		return nil, "", err
 	}
 
 	name := logName(t)
-
-	fname := filepath.Join(logDir, name)
+	fname := filepath.Join(config.LogDir, name)
 	f, err = os.Create(fname)
 	if err == nil {
 		return f, fname, nil
 	}
 
 	return nil, "", fmt.Errorf("log: cannot create log: %v", err)
+}
+
+//如果路径不存在就创建
+func createDir(logDir string) error {
+	if len(logDir) == 0 {
+		return errors.New("invalid dir")
+	}
+	s, err := os.Stat(logDir)
+	if err != nil {
+		if !os.IsExist(err) { //不存在
+			err = os.Mkdir(logDir, os.ModePerm)
+			if err != nil {
+				return err
+			}
+		}
+	} else {
+		if !s.IsDir() { //是个文件
+			return errors.New("logDir is a file")
+		}
+	}
+	return nil
 }

@@ -27,6 +27,6 @@ func TestAllLevel(t *testing.T){
 		Infoln("Infoln", 123, "fsef")
 		Warningln("Warningln", 123, "fsef")
 		Errorln("Errorln", 123, "fsef")
-		Flush()
+		//Flush()
 	})
 }

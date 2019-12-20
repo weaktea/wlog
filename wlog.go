@@ -1,42 +1,16 @@
-//	-logtostderr=false
-//		Logs are written to standard error instead of to files.
-//	-alsologtostderr=false
-//		Logs are written to standard error as well as to files.
-//	-stderrthreshold=ERROR
-//		Log events at or above this severity are logged to standard
-//		error as well as to files.
-//	-log_dir=""
-//		Log files will be written to this directory instead of the
-//		default directory ./log/.
-//
-//	Other flags provide aids to debugging.
-//
-//	-log_backtrace_at=""
-//		When set to a file and line number holding a logging statement,
-//		such as
-//			-log_backtrace_at=gopherflakes.go:234
-//		a stack trace will be written to the Info log whenever execution
-//		hits that statement. (Unlike with -vmodule, the ".go" must be
-//		present.)
-//  -logThreshold=INFO
-//		Log events at or above this severity are logged to file
-
 package wlog
 
 import (
 	"bufio"
 	"bytes"
-	"flag"
 	"fmt"
 	"io"
 	"os"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
-	"errors"
 )
 
 var logging loggingT
@@ -53,14 +27,6 @@ const (
 	NUMSEVERITY = 5
 )
 
-var severityName = []string{
-	DEBUG:   "DEBUG",
-	INFO:    "INFO",
-	WARNING: "WARNING",
-	ERROR:   "ERROR",
-	FATAL:   "FATAL",
-}
-
 var severityString = []string{
 	DEBUG:   "[DEBUG  ]",
 	INFO:    "[INFO   ]",
@@ -70,120 +36,38 @@ var severityString = []string{
 }
 
 // get returns the value of the severity.
-func (s *severity) get() severity {
+func (s *severity) Get() severity {
 	return severity(atomic.LoadInt32((*int32)(s)))
 }
 
 // set sets the value of the severity.
-func (s *severity) set(val severity) {
+func (s *severity) Set(val severity) {
 	atomic.StoreInt32((*int32)(s), int32(val))
-}
-
-// String is part of the flag.Value interface.
-func (s *severity) String() string {
-	return strconv.FormatInt(int64(*s), 10)
-}
-
-// Get is part of the flag.Value interface.
-func (s *severity) Get() interface{} {
-	return *s
-}
-
-// Set is part of the flag.Value interface.
-func (s *severity) Set(value string) error {
-	var threshold severity
-	// Is it a known name?
-	if v, ok := severityByName(value); ok {
-		threshold = v
-	} else {
-		v, err := strconv.Atoi(value)
-		if err != nil {
-			return err
-		}
-		threshold = severity(v)
-	}
-	s.set(threshold)
-	return nil
-}
-
-func severityByName(s string) (severity, bool) {
-	s = strings.ToUpper(s)
-	for i, name := range severityName {
-		if name == s {
-			return severity(i), true
-		}
-	}
-	return 0, false
 }
 
 // traceLocation represents the setting of the -log_backtrace_at flag.
 type traceLocation struct {
-	file string
-	line int
+	File string
+	Line int
 }
 
 // isSet reports whether the trace location has been specified.
 // logging.mu is held.
 func (t *traceLocation) isSet() bool {
-	return t.line > 0
+	return t.Line > 0
 }
 
 // match reports whether the specified file and line matches the trace location.
 // The argument file name is the full path, not the basename specified in the flag.
 // logging.mu is held.
 func (t *traceLocation) match(file string, line int) bool {
-	if t.line != line {
+	if t.Line != line {
 		return false
 	}
 	if i := strings.LastIndex(file, "/"); i >= 0 {
 		file = file[i+1:]
 	}
-	return t.file == file
-}
-
-func (t *traceLocation) String() string {
-	// Lock because the type is not atomic. TODO: clean this up.
-	logging.mu.Lock()
-	defer logging.mu.Unlock()
-	return fmt.Sprintf("%s:%d", t.file, t.line)
-}
-
-// Get is part of the (Go 1.2) flag.Getter interface. It always returns nil for this flag type since the
-// struct is not exported
-func (t *traceLocation) Get() interface{} {
-	return nil
-}
-
-var errTraceSyntax = errors.New("syntax error: expect file.go:234")
-
-// Syntax: -log_backtrace_at=gopherflakes.go:234
-// Note that unlike vmodule the file extension is included here.
-func (t *traceLocation) Set(value string) error {
-	if value == "" {
-		// Unset.
-		t.line = 0
-		t.file = ""
-	}
-	fields := strings.Split(value, ":")
-	if len(fields) != 2 {
-		return errTraceSyntax
-	}
-	file, line := fields[0], fields[1]
-	if !strings.Contains(file, ".") {
-		return errTraceSyntax
-	}
-	v, err := strconv.Atoi(line)
-	if err != nil {
-		return errTraceSyntax
-	}
-	if v <= 0 {
-		return errors.New("negative or zero value for level")
-	}
-	logging.mu.Lock()
-	defer logging.mu.Unlock()
-	t.line = v
-	t.file = file
-	return nil
+	return t.File == file
 }
 
 // buffer holds a byte Buffer for reuse. The zero value is ready for use.
@@ -242,16 +126,7 @@ type flushSyncWriter interface {
 }
 
 func init() {
-	flag.BoolVar(&logging.toStderr, "logtostderr", false, "log to standard error instead of files")
-	flag.BoolVar(&logging.alsoToStderr, "alsologtostderr", false, "log to standard error as well as files")
-	flag.Var(&logging.stderrThreshold, "stderrthreshold", "logs at or above this threshold go to stderr")
-	flag.Var(&logging.traceLocation, "log_backtrace_at", "when logging hits line file:N, emit a stack trace")
-	flag.Var(&logging.logThreshold, "logThreshold", "logs at or above this threshold go to file")
-
-	// Default stderrThreshold is ERROR.
-	logging.stderrThreshold = ERROR
-	logging.logThreshold = INFO
-
+	LoadXmlConfig()
 	go logging.flushDaemon()
 }
 
@@ -261,15 +136,6 @@ func Flush() {
 }
 
 type loggingT struct {
-	// Boolean flags. Not handled atomically because the flag.Value interface
-	// does not let us avoid the =true, and that shorthand is necessary for
-	// compatibility. TODO: does this matter enough to fix? Seems unlikely.
-	toStderr     bool // The -logtostderr flag.
-	alsoToStderr bool // The -alsologtostderr flag.
-
-	// Level flag. Handled atomically.
-	stderrThreshold severity // The -stderrthreshold flag.
-
 	// freeList is a list of byte buffers, maintained under freeListMu.
 	freeList *buffer
 	// freeListMu maintains the free list. It is separate from the main mutex
@@ -282,27 +148,21 @@ type loggingT struct {
 	mu sync.Mutex
 	// file holds writer for each of the log types.
 	file flushSyncWriter
-
-	// traceLocation is the state of the -log_backtrace_at flag.
-	traceLocation traceLocation
-
-	// Level flag. Handled atomically.
-	logThreshold severity // The -logThreshold flag.
 }
 
 // output writes the data to the log files and releases the buffer.
 func (l *loggingT) output(s severity, buf *buffer, file string, line int, alsoToStderr bool) {
 	l.mu.Lock()
-	if l.traceLocation.isSet() {
-		if l.traceLocation.match(file, line) {
+	if config.TraceLocation.isSet() {
+		if config.TraceLocation.match(file, line) {
 			buf.Write(stacks(false))
 		}
 	}
 	data := buf.Bytes()
-	if l.toStderr {
+	if config.ToStderr {
 		os.Stderr.Write(data)
 	} else {
-		if alsoToStderr || l.alsoToStderr || s >= l.stderrThreshold.get() {
+		if alsoToStderr || config.AlsoToStderr || s >= config.StderrThreshold.Get() {
 			os.Stderr.Write(data)
 		}
 		if l.file == nil {
@@ -311,7 +171,7 @@ func (l *loggingT) output(s severity, buf *buffer, file string, line int, alsoTo
 				l.exit(err)
 			}
 		}
-		if s >= l.logThreshold.get(){
+		if s >= config.LogThreshold.Get() {
 			l.file.Write(data)
 		}
 	}
@@ -324,14 +184,13 @@ func (l *loggingT) output(s severity, buf *buffer, file string, line int, alsoTo
 		}
 		// Dump all goroutine stacks before exiting.
 		// First, make sure we see the trace for the current goroutine on standard error.
-		// If -logtostderr has been specified, the loop below will do that anyway
 		// as the first stack in the full dump.
-		if !l.toStderr {
+		if !config.ToStderr {
 			os.Stderr.Write(stacks(false))
 		}
 		// Write the stack trace for all goroutines to the files.
 		trace := stacks(true)
-		if f := l.file; f != nil {// Can be nil if -logtostderr is set.
+		if f := l.file; f != nil { // Can be nil if Tostderr is set.
 			f.Write(trace)
 		}
 		l.mu.Unlock()
@@ -340,6 +199,9 @@ func (l *loggingT) output(s severity, buf *buffer, file string, line int, alsoTo
 	}
 	l.putBuffer(buf)
 	l.mu.Unlock()
+	if config.FlushInterval <= 0 {
+		timeoutFlush(10 * time.Second)
+	}
 }
 
 // createFiles creates all the log files for severity from sev down to infoLog.
@@ -347,7 +209,7 @@ func (l *loggingT) output(s severity, buf *buffer, file string, line int, alsoTo
 func (l *loggingT) createFile() error {
 	now := time.Now()
 
-	if l.file == nil{
+	if l.file == nil {
 		sb := &syncBuffer{
 			logger: l,
 		}
@@ -359,11 +221,13 @@ func (l *loggingT) createFile() error {
 	return nil
 }
 
-const flushInterval = 30 * time.Second
-
 // flushDaemon periodically flushes the log file buffers.
 func (l *loggingT) flushDaemon() {
-	for _ = range time.NewTicker(flushInterval).C {
+	if config.FlushInterval <= 0 {
+		return
+	}
+
+	for _ = range time.NewTicker(time.Duration(config.FlushInterval)*time.Millisecond).C {
 		l.lockAndFlush()
 	}
 }
@@ -570,7 +434,7 @@ func (sb *syncBuffer) Sync() error {
 }
 
 func (sb *syncBuffer) Write(p []byte) (n int, err error) {
-	if sb.nbytes+uint64(len(p)) >= MaxSize {
+	if sb.nbytes+uint64(len(p)) >= config.MaxSize {
 		if err := sb.rotateFile(time.Now()); err != nil {
 			sb.logger.exit(err)
 		}
@@ -584,6 +448,7 @@ func (sb *syncBuffer) Write(p []byte) (n int, err error) {
 }
 
 const bufferSize = 256 * 1024
+
 // rotateFile closes the syncBuffer's file and starts a new one.
 func (sb *syncBuffer) rotateFile(now time.Time) error {
 	if sb.file != nil {
