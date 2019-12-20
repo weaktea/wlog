@@ -26,7 +26,7 @@ func TestAllLevel(t *testing.T){
 		Debugln("debug ln", 123, "fsef")
 		Infoln("Infoln", 123, "fsef")
 		Warningln("Warningln", 123, "fsef")
-		Errorln("Errorln", 123, "fsef")
+		Errorln("Errorln", 1234, "fsef")
 		//Flush()
 	})
 }
