@@ -8,20 +8,24 @@ import (
 )
 
 const (
-	CONFIG_FILE_DIR  = "./conf/"
-	CONFIG_FILE_NAME = "wlog.xml"
-	CONFIG_FILE_PATH = CONFIG_FILE_DIR + CONFIG_FILE_NAME
+	CONFIG_FILE_DIR   = "./conf/"
+	CONFIG_FILE_NAME  = "wlog.xml"
+	CONFIG_FILE_PATH  = CONFIG_FILE_DIR + CONFIG_FILE_NAME
 )
 
 type WlogConfig struct {
-	ToStderr        bool
-	AlsoToStderr    bool
-	StderrThreshold severity
-	TraceLocation   traceLocation
-	LogThreshold    severity
-	FlushInterval   int64
-	LogDir          string
-	MaxSize         uint64
+	ToStderr         bool
+	AlsoToStderr     bool
+	CStderrThreshold string `xml:",comment"`
+	StderrThreshold  severity
+	TraceLocation    traceLocation
+	CLogThreshold    string `xml:",comment"`
+	LogThreshold     severity
+	CFlushInterval   string `xml:",comment"`
+	FlushInterval    int64
+	LogDir           string
+	CMaxSize         string `xml:",comment"`
+	MaxSize          uint64
 }
 
 var config WlogConfig
@@ -51,6 +55,11 @@ func LoadXmlConfig() {
 }
 
 func GenConfigFile() {
+	SERVERITY_COMMENT := "0:DEBUG 1:INFO 2:WARNING 3:ERROR 4:FATAL"
+	config.CStderrThreshold = SERVERITY_COMMENT
+	config.CLogThreshold = SERVERITY_COMMENT
+	config.CFlushInterval = "ms"
+	config.CMaxSize = "bytes"
 	buff, err := xml.MarshalIndent(&config, "", "    ")
 	if err != nil {
 		fmt.Println("Marshal failed")
@@ -68,7 +77,7 @@ func GenConfigFile() {
 		return
 	}
 	defer file.Close()
-	_,err = file.Write(buff)
+	_, err = file.Write(buff)
 	if err != nil {
 		fmt.Println(CONFIG_FILE_PATH, " Write failed!")
 	}
