@@ -3,7 +3,7 @@ package wlog
 import (
 	"testing"
 )
-//CMD: go test -v -count=1 -run TestAllLevel -logThreshold=WARNING
+//CMD: go test -v -count=1 -run TestAllLevel
 
 func TestDebug(t *testing.T) {
 	t.Run("Info", func(t *testing.T) {
